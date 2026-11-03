@@ -14,10 +14,12 @@ the service.
 | Item | Value |
 |---|---|
 | Translation endpoint | `POST /translate` |
+| Transcription endpoint | `POST /transcribe` (Hindi audio to text via Whisper small) |
 | Health check | `GET /healthz` (no authentication) |
 | Status | `GET /status` (authentication required) |
 | Warm-up | `POST /warmup` (authentication required) |
 | Maximum input | 2000 Unicode characters |
+| Maximum audio upload | 25 MB by default |
 | Idle shutdown | Worker stops after 10 minutes without a request |
 | First request after idle | Roughly 10–15 seconds while the model loads |
 | Normal request | Well under a second for short text |
@@ -54,8 +56,12 @@ There are two processes by design:
 
 - The **gateway** is small, always running, and handles authentication,
   limits, queueing, and lifecycle.
-- The **worker** owns the model. It is disposable, handles one translation at
-  a time, and exits after 10 minutes of inactivity.
+- The **worker** owns the model. It is disposable, handles one translation or
+  transcription at a time, and exits after 10 minutes of inactivity.
+
+The transcription path shares the same gateway lifecycle and safety checks as
+`/translate`, but uses a separate Whisper model load that is delayed until the
+first audio request.
 
 ### Worker lifecycle
 
@@ -143,19 +149,34 @@ curl -sS "$BASE_URL/translate" \
 # {"translation":"ഹലോ, നിങ്ങൾ എങ്ങനെയുണ്ട്?"}
 ```
 
+### Transcribe
+
+```sh
+curl -sS -X POST "$BASE_URL/transcribe" \
+  -H "Authorization: ******" \
+  -F "audio=@/path/to/hindi-audio.wav"
+
+# {"text":"नमस्ते, आप कैसे हैं?"}
+```
+
+The transcription endpoint accepts multipart audio, validates the size at the
+gateway before the upload is forwarded, and returns the transcribed Hindi text
+as JSON.
+
 Errors:
 
 | Condition | Status |
 |---|---|
-| Body larger than 16 KB | `413` |
+| Request body or audio payload exceeds the configured limit | `413` |
 | Missing, malformed, or wrong key | `401` with `{"error":"unauthorized"}` |
 | Rate limit, queue full, or failed-auth IP block | `429` + `Retry-After` |
 | Invalid JSON/UTF-8, empty text, or more than 2000 characters | `400` |
-| Cold start failed, cooldown, crash, or translation timeout | `503` + `Retry-After` |
+| Invalid multipart, missing `audio`, empty payload, or worker-side transcription failure | `400` / `500` |
+| Cold start failed, cooldown, crash, or translation/transcription timeout | `503` + `Retry-After` |
 | Funnel cannot reach the gateway | `502` |
 
-The worker is killed after a translation timeout; the next request cold-starts
-a fresh worker after the cooldown.
+The worker is killed after a translation or transcription timeout; the next
+request cold-starts a fresh worker after the cooldown.
 
 ## Managing keys
 
@@ -286,7 +307,10 @@ Common settings:
 | `TRANSLATOR_COLD_START_WAIT` | `60s` | How long a request waits for a cold start |
 | `TRANSLATOR_TRANSLATE_TIMEOUT` | `60s` | Queue wait plus worker request timeout |
 | `TRANSLATOR_STARTUP_COOLDOWN` | `30s` | Cooldown after a failure or crash |
+| `TRANSLATOR_MAX_BODY_BYTES` | `16384` | Maximum JSON request body size |
+| `TRANSLATOR_MAX_AUDIO_BYTES` | `25 MB` | Maximum multipart audio upload size |
 | `TRANSLATOR_MAX_TEXT_RUNES` | `2000` | Maximum input length |
+| `TRANSLATOR_WHISPER_MODEL` | `openai/whisper-small` | Speech-to-text model for `/transcribe` |
 | `TRANSLATOR_RATE_LIMIT_PER_MINUTE` | `30` | Per-key sustained rate |
 | `TRANSLATOR_RATE_LIMIT_BURST` | `30` | Per-key burst |
 | `TRANSLATOR_QUEUE_DEPTH` | `8` | Waiting requests |
@@ -300,6 +324,26 @@ Common settings:
 The example environment raises `TRANSLATOR_COLD_START_WAIT` to `90s` for this
 4-core CPU host. Lower `BEAMS` or `BATCH_SIZE` if long requests approach the
 translation timeout.
+
+## Planned improvements
+
+The current service is stable and simple, but the following upgrades would make
+it easier to operate and harder to regress over time:
+
+- Add focused integration tests for `/translate`, `/transcribe`, auth failures,
+  rate limiting, queue saturation, timeout handling, and cold starts.
+- Add audio validation before Whisper inference: reject unsupported or
+  corrupt payloads early, validate duration and sample rate, and catch empty
+  or malformed audio sooner.
+- Add richer observability for per-route latency, queue waits, worker startup
+  failures, and timeout counts without logging request text or model output.
+- Consider separate fair queues for text and audio traffic if transcription
+  volume grows and long recordings begin to starve translation requests.
+- Add request IDs in the gateway logs and headers to simplify debugging while
+  keeping payload content out of logs.
+
+These changes are intentionally small and operationally focused; they do not
+change the current architecture or the public API contract.
 
 ## Repository layout
 
