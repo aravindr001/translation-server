@@ -1,0 +1,19 @@
+# Local build and test output
+/bin/
+*.test
+*.out
+
+# Python
+__pycache__/
+*.py[cod]
+worker/.venv/
+nenv/
+
+# Local toolchain cache
+/.tools/
+
+# Never commit real keys, tokens, or model caches
+keys.json
+*.hf_token
+.hf_token
+/var/

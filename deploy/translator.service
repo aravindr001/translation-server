@@ -1,0 +1,66 @@
+[Unit]
+Description=Hindi to Malayalam translation gateway
+Documentation=file:///opt/translator/README.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=60s
+ExecStart=/opt/translator/bin/gateway serve
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+KillMode=mixed
+KillSignal=SIGTERM
+
+User=translator
+Group=translator
+WorkingDirectory=/opt/translator
+EnvironmentFile=/etc/translator/translator.env
+UMask=0077
+RuntimeDirectory=translator
+RuntimeDirectoryMode=0700
+StateDirectory=translator
+StateDirectoryMode=0700
+
+# The hard cap covers the gateway plus its one worker. Model weights are
+# reclaimable file-backed pages; the cap mainly bounds anonymous Python/torch
+# memory.
+MemoryHigh=2800M
+MemoryMax=3200M
+MemorySwapMax=2G
+TasksMax=256
+LimitNOFILE=4096
+# The worker is the intended OOM victim; keep the small gateway alive so it can
+# report 503/cooldown instead of taking the whole unit down.
+OOMPolicy=continue
+
+# Hardening. MemoryDenyWriteExecute is intentionally absent: Python C
+# extensions and torch require writable executable mappings.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
