@@ -92,6 +92,7 @@ func New(cfg config.Config, log *slog.Logger) *Server {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/translate", s.handleTranslate)
+	mux.HandleFunc("/transcribe", s.handleTranscribe)
 	mux.HandleFunc("/warmup", s.handleWarmup)
 	mux.HandleFunc("/status", s.handleStatus)
 	mux.HandleFunc("/healthz", s.handleHealthz)
@@ -303,6 +304,89 @@ func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, http.StatusOK, map[string]string{"translation": translation})
+}
+
+func (s *Server) handleTranscribe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if _, ok := s.authenticate(w, r); !ok {
+		return
+	}
+
+	if err := r.ParseMultipartForm(s.cfg.MaxAudioBytes); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			s.writeError(w, http.StatusRequestEntityTooLarge, "audio too large", 0)
+			return
+		}
+		s.writeError(w, http.StatusBadRequest, "invalid multipart form", 0)
+		return
+	}
+
+	file, header, err := r.FormFile("audio")
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "audio is required", 0)
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid audio", 0)
+		return
+	}
+	if len(data) == 0 {
+		s.writeError(w, http.StatusBadRequest, "audio is required", 0)
+		return
+	}
+
+	select {
+	case s.queue <- struct{}{}:
+		defer func() { <-s.queue }()
+	default:
+		s.writeError(w, http.StatusTooManyRequests, "translation queue full", 2*time.Second)
+		return
+	}
+
+	s.mgr.Begin()
+	defer s.mgr.End()
+
+	coldCtx, cancelCold := context.WithTimeout(context.Background(), s.cfg.ColdStartWait)
+	if err := s.mgr.EnsureRunning(coldCtx); err != nil {
+		cancelCold()
+		s.writeWorkerUnavailable(w, err)
+		return
+	}
+	cancelCold()
+
+	queueCtx, cancelQueue := context.WithTimeout(context.Background(), s.cfg.TranslateTimeout)
+	select {
+	case s.sem <- struct{}{}:
+		defer func() { <-s.sem }()
+	case <-queueCtx.Done():
+		cancelQueue()
+		s.writeError(w, http.StatusServiceUnavailable, "translation queue wait timed out", 5*time.Second)
+		return
+	}
+	cancelQueue()
+
+	tctx, cancelTranslate := context.WithTimeout(context.Background(), s.cfg.TranslateTimeout)
+	text, err := s.mgr.Transcribe(tctx, header.Filename, data)
+	timedOut := errors.Is(tctx.Err(), context.DeadlineExceeded)
+	cancelTranslate()
+	if err != nil {
+		if timedOut {
+			s.mgr.ForceStop("translation_timeout")
+			s.writeError(w, http.StatusServiceUnavailable, "translation timed out", 5*time.Second)
+			return
+		}
+		s.writeError(w, http.StatusServiceUnavailable, "worker request failed", 5*time.Second)
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]string{"text": text})
 }
 
 func (s *Server) handleWarmup(w http.ResponseWriter, r *http.Request) {

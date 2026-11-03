@@ -23,7 +23,9 @@ type Config struct {
 	ShutdownGrace      time.Duration
 	StartupCooldown    time.Duration
 	MaxBodyBytes       int64
+	MaxAudioBytes      int64
 	MaxTextRunes       int
+	WhisperModel       string
 	RateLimitPerMinute int
 	RateLimitBurst     int
 	AuthFailLimit      int
@@ -49,7 +51,9 @@ func Default() Config {
 		ShutdownGrace:      10 * time.Second,
 		StartupCooldown:    30 * time.Second,
 		MaxBodyBytes:       16 * 1024,
+		MaxAudioBytes:      25 * 1024 * 1024,
 		MaxTextRunes:       2000,
+		WhisperModel:       "openai/whisper-small",
 		RateLimitPerMinute: 30,
 		RateLimitBurst:     30,
 		AuthFailLimit:      10,
@@ -97,9 +101,13 @@ func Load() (Config, error) {
 	if c.MaxBodyBytes, err = envInt64("TRANSLATOR_MAX_BODY_BYTES", c.MaxBodyBytes); err != nil {
 		return c, err
 	}
+	if c.MaxAudioBytes, err = envInt64("TRANSLATOR_MAX_AUDIO_BYTES", c.MaxAudioBytes); err != nil {
+		return c, err
+	}
 	if c.MaxTextRunes, err = envInt("TRANSLATOR_MAX_TEXT_RUNES", c.MaxTextRunes); err != nil {
 		return c, err
 	}
+	c.WhisperModel = strings.TrimSpace(envString("TRANSLATOR_WHISPER_MODEL", c.WhisperModel))
 	if c.RateLimitPerMinute, err = envInt("TRANSLATOR_RATE_LIMIT_PER_MINUTE", c.RateLimitPerMinute); err != nil {
 		return c, err
 	}
@@ -150,6 +158,12 @@ func (c Config) Validate() error {
 	}
 	if c.MaxBodyBytes <= 0 {
 		return fmt.Errorf("TRANSLATOR_MAX_BODY_BYTES must be positive")
+	}
+	if c.MaxAudioBytes <= 0 {
+		return fmt.Errorf("TRANSLATOR_MAX_AUDIO_BYTES must be positive")
+	}
+	if c.WhisperModel == "" {
+		return fmt.Errorf("TRANSLATOR_WHISPER_MODEL must not be empty")
 	}
 	if c.MaxTextRunes <= 0 {
 		return fmt.Errorf("TRANSLATOR_MAX_TEXT_RUNES must be positive")

@@ -161,6 +161,11 @@ func (m *Manager) Translate(ctx context.Context, text string) (string, error) {
 	return m.client.Translate(ctx, text)
 }
 
+// Transcribe sends one audio transcription request to the current worker.
+func (m *Manager) Transcribe(ctx context.Context, filename string, data []byte) (string, error) {
+	return m.client.Transcribe(ctx, filename, data)
+}
+
 // Begin marks a translate request as in flight. It resets the idle timer.
 func (m *Manager) Begin() {
 	m.mu.Lock()

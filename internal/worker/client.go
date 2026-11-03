@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"time"
@@ -99,6 +100,53 @@ func (c *Client) Translate(ctx context.Context, text string) (string, error) {
 		return "", fmt.Errorf("decode worker response: %w", err)
 	}
 	return out.Translation, nil
+}
+
+func (c *Client) Transcribe(ctx context.Context, filename string, data []byte) (string, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("audio", filename)
+	if err != nil {
+		return "", err
+	}
+	if _, err = part.Write(data); err != nil {
+		return "", err
+	}
+	if err = writer.Close(); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix/transcribe", &body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("worker /transcribe returned HTTP %d", resp.StatusCode)
+	}
+
+	outData, err := io.ReadAll(io.LimitReader(resp.Body, maxWorkerResponse+1))
+	if err != nil {
+		return "", fmt.Errorf("read worker transcribe response: %w", err)
+	}
+	if len(outData) > maxWorkerResponse {
+		return "", errors.New("worker transcribe response too large")
+	}
+	var out struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(outData, &out); err != nil {
+		return "", fmt.Errorf("decode worker transcribe response: %w", err)
+	}
+	return out.Text, nil
 }
 
 // ReadyPollInterval is the cadence used while a worker is loading.

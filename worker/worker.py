@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import io
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ MAX_LENGTH = int(os.environ.get("TRANSLATOR_MAX_LENGTH", "256"))
 MAX_CHUNK_CHARS = int(os.environ.get("TRANSLATOR_MAX_CHUNK_CHARS", "400"))
 MAX_TEXT_RUNES = int(os.environ.get("TRANSLATOR_MAX_TEXT_RUNES", "2000"))
 MAX_BODY_BYTES = int(os.environ.get("TRANSLATOR_MAX_BODY_BYTES", "16384"))
+WHISPER_MODEL = os.environ.get("TRANSLATOR_WHISPER_MODEL", "openai/whisper-small").strip()
 OOM_SCORE_ADJ = int(os.environ.get("TRANSLATOR_OOM_SCORE_ADJ", "500"))
 
 os.umask(0o077)
@@ -113,7 +115,7 @@ raise_oom_score()
 # Heavy imports follow the environment and OOM setup.
 import torch  # noqa: E402
 import uvicorn  # noqa: E402
-from fastapi import FastAPI, Request  # noqa: E402
+from fastapi import FastAPI, File, Request, UploadFile  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer  # noqa: E402
 
@@ -179,7 +181,52 @@ class ModelHolder:
 
 HOLDER = ModelHolder()
 EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="translate")
+WHISPER_HOLDER = {"ready": False, "model": None, "lock": threading.Lock()}
 APP = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+
+def load_whisper() -> None:
+    if WHISPER_HOLDER["ready"]:
+        return
+    with WHISPER_HOLDER["lock"]:
+        if WHISPER_HOLDER["ready"]:
+            return
+        try:
+            import librosa  # noqa: E402
+            import soundfile as sf  # noqa: E402
+            from transformers import pipeline  # noqa: E402
+        except Exception as exc:  # pragma: no cover - dependency/runtime issue
+            log.error("whisper load failed", extra={"error_type": type(exc).__name__})
+            raise
+
+        model = pipeline(
+            "automatic-speech-recognition",
+            model=WHISPER_MODEL,
+            device=-1,
+            tokenizer=WHISPER_MODEL,
+            feature_extractor=WHISPER_MODEL,
+        )
+        WHISPER_HOLDER["model"] = model
+        WHISPER_HOLDER["ready"] = True
+
+
+def transcribe_audio(model, raw: bytes) -> str:
+    if not raw:
+        raise ValueError("audio is empty")
+    try:
+        import numpy as np
+        import soundfile as sf
+
+        data, rate = sf.read(io.BytesIO(raw), dtype="float32", always_2d=False)
+        if data.ndim == 2:
+            data = data.mean(axis=1)
+        result = model({"array": np.asarray(data, dtype=np.float32), "sampling_rate": rate}, task="transcribe")
+        text = result.get("text", "")
+        return str(text).strip()
+    except Exception:
+        result = model(raw, task="transcribe")
+        text = result.get("text", "")
+        return str(text).strip()
 
 
 def load_model() -> None:
@@ -361,6 +408,32 @@ async def translate(request: Request):
         log.error("generation failed", extra={"error_type": type(exc).__name__})
         return JSONResponse(status_code=500, content={"error": "translation failed"})
     return JSONResponse(status_code=200, content={"translation": translation})
+
+
+@APP.post("/transcribe")
+async def transcribe(audio: UploadFile = File(...)):
+    if not WHISPER_HOLDER["ready"]:
+        load_whisper()
+    if not WHISPER_HOLDER["ready"]:
+        return JSONResponse(status_code=503, content={"error": "not ready"})
+
+    raw = await audio.read()
+    if not raw:
+        return JSONResponse(status_code=400, content={"error": "audio is required"})
+
+    model = WHISPER_HOLDER["model"]
+    if model is None:
+        return JSONResponse(status_code=503, content={"error": "not ready"})
+
+    try:
+        text = transcribe_audio(model, raw)
+    except Exception as exc:
+        log.error("transcription failed", extra={"error_type": type(exc).__name__})
+        return JSONResponse(status_code=500, content={"error": "transcription failed"})
+
+    if not text:
+        return JSONResponse(status_code=400, content={"error": "transcription is empty"})
+    return JSONResponse(status_code=200, content={"text": text})
 
 
 def main() -> None:
